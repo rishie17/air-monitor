@@ -1,3 +1,4 @@
+#pragma once
 #include "driver/i2c_types.h"
 #include "stdint.h"
 typedef struct scd40 scd40;
