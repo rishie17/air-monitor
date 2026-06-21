@@ -20,8 +20,9 @@ esp_err_t scd40_stop_periodic_measurement(scd40 *device);
  * else, you'll receive a NACK from the sensor, and error from
  * this function along with marking all measurements "0"
  */
-esp_err_t scd40_read_measurement(scd40 *device, int *temp_c_deg,
-                                 int *humidity_rh_percent, uint16_t *co2_ppm);
+esp_err_t scd40_read_measurement(scd40 *device, int8_t *temp_c_deg,
+                                 uint8_t *humidity_rh_percent,
+                                 uint16_t *co2_ppm);
 /*
  * Returns non-zero if the data is ready.
  * Can be called in a loop for polling

@@ -95,8 +95,9 @@ esp_err_t scd40_stop_periodic_measurement(scd40 *device) {
   return scd40_send_command(SCD40_STOP_PERIODIC_MEASUREMENT, device);
 }
 
-esp_err_t scd40_read_measurement(scd40 *device, int *temp_c_deg,
-                                 int *humidity_rh_percent, uint16_t *co2_ppm) {
+esp_err_t scd40_read_measurement(scd40 *device, int8_t *temp_c_deg,
+                                 uint8_t *humidity_rh_percent,
+                                 uint16_t *co2_ppm) {
 
   // TODO: Add Define Options to enable checking CRC. (We aren't checking now)
 
@@ -111,9 +112,10 @@ esp_err_t scd40_read_measurement(scd40 *device, int *temp_c_deg,
   }
 
   // Tick Conversion - SCD4X Datasheet pg.no 9
-  *temp_c_deg = ((((int)buf[3] << 8) | buf[4]) * 175) / ((1 << 16) - 1) - 45;
+  *temp_c_deg =
+      (int8_t)(((((int)buf[3] << 8) | buf[4]) * 175) / ((1 << 16) - 1) - 45);
   *humidity_rh_percent =
-      ((((int)buf[6] << 8) | buf[7]) * 100) / ((1 << 16) - 1);
+      (uint8_t)(((((int)buf[6] << 8) | buf[7]) * 100) / ((1 << 16) - 1));
   *co2_ppm = ((uint16_t)buf[0] << 8) | buf[1];
   OLOG("Read measurements");
   return error;
