@@ -1,4 +1,5 @@
 #include "Measurement_packet.h"
+#include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "driver/i2c_types.h"
 #include "esp_err.h"
@@ -8,23 +9,25 @@
 #include "host/ble_hs.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
-#include "portmacro.h"
 #include "soc/clk_tree_defs.h"
+#include "soc/gpio_num.h"
 #include <driver_scd40.h>
 #include <driver_sgp41.h>
-#include <esp_attr.h>
 #include <esp_log.h>
 #include <esp_sleep.h>
 #include <nvs_flash.h>
+#include <ssd1306.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
 static const char *BLE_Adv = "BTHOME_ADV";
-RTC_FAST_ATTR uint16_t INTERVAL;
 RTC_FAST_ATTR Measurement data;
+// 0 for display not woken up, 1 for display woken up
+uint8_t display_status = 0;
 TaskHandle_t ble_handle;
 TaskHandle_t main_handle;
+TaskHandle_t display_handle;
 uint8_t ble_addr_type;
 
 void start_adv(void *pvParams) {
@@ -97,18 +100,83 @@ void start_adv(void *pvParams) {
   }
 }
 
+// This task should be woken up after it's requirements:
+// 1) SSD1306 driver init along with the handle
 void displayData(void *pvParams) {
-  printf("CO2: %hupmm\nRH: %hhu\nTemp: %hhd C\nVOC: %huppm\nNOX: %huppm\n",
-         data.co2_ppm, data.RH_percent, data.temp_deg_c, data.tvoc_ppm,
-         data.nox_ppm);
+  ssd1306_handle_t d = (ssd1306_handle_t)pvParams;
+  while (1) {
+    xTaskNotifyWait(0, 0, 0, portMAX_DELAY);
+    ssd1306_clear(d);
+    // Header Bar
+    ssd1306_draw_text_scaled(d, 0, 0, "!Air", true, 2);
+    ssd1306_draw_text_scaled(d, 58, 0, "AQI", true, 2);
+    // TODO: Calculate AQI once BMV is resolved along with PM10 and PM2.5
+    ssd1306_draw_text_scaled(d, 94, 0, "XXX", true, 2);
+    ssd1306_draw_text(d, 0, 16, "  CO2:", true);
+    ssd1306_draw_text(d, 0, 16 + 10, "PM2.5:", true);
+    ssd1306_draw_text(d, 0, 16 + 20, " PM10:", true);
+    ssd1306_draw_text(d, 0, 16 + 30, "   \"C:", true);
+    ssd1306_draw_text(d, 0, 16 + 40, "   RH:", true);
+
+    // The following block if text printing are only supposed to handle 4 digits
+    char buf[6];
+    sprintf(buf, "%hu", data.co2_ppm);
+    ssd1306_draw_text(d, 36, 16, buf, true);         // CO2
+    ssd1306_draw_text(d, 36, 16 + 10, "XXXX", true); // PM2.5
+    ssd1306_draw_text(d, 36, 16 + 20, "XXXX", true); // PM10
+    sprintf(buf, "%hd", data.temp_deg_c);
+    ssd1306_draw_text(d, 36, 16 + 30, buf, true); // Temp Deg C
+    sprintf(buf, "%u", data.RH_percent);
+    ssd1306_draw_text(d, 36, 16 + 40, buf, true); // RH
+
+    ssd1306_draw_text(d, 64, 16, "TVOC:", true);
+    ssd1306_draw_text(d, 64, 16 + 10, " NOX:", true);
+
+    // The following display bots
+    sprintf(buf, "%hu", data.tvoc_ppm);
+    ssd1306_draw_text(d, 64 + 30, 16, buf, true);
+    sprintf(buf, "%hu", data.nox_ppm);
+    ssd1306_draw_text(d, 64 + 30, 16 + 10, buf, true);
+
+    ssd1306_draw_rect(d, 64, 16 + 20, 60, 26, true);
+
+    ssd1306_display(d);
+    ssd1306_display_wakeup(d);
+  }
   vTaskDelete(NULL);
 }
 
-void wake_up() {
-  if (esp_sleep_get_wakeup_causes() == ESP_SLEEP_WAKEUP_GPIO) {
-    xTaskCreate(displayData, "display", 2048, NULL, 2, NULL);
+// The button only works once, i.e. the display will stay on for a fixed amount
+// of time, and quit. Pressing the button multiple times will not extend the
+// device wake period
+// TODO: Have to spend sometime to check if extending the display time is worth
+// it since we'll be blocking other tasks and Measurement broadcasts will be on
+// hold
+void wakeup_display(void *pv) {
+  if (!display_status) {
+    xTaskNotifyGive(display_handle);
+    display_status = 1;
   }
-  INTERVAL = 10;
+}
+
+void config_display() {
+  uint32_t wakeup_causes = esp_sleep_get_wakeup_causes();
+  if (wakeup_causes & BIT(ESP_SLEEP_WAKEUP_GPIO)) {
+    // TODO: Wake up the display task
+    xTaskNotifyGive(display_handle);
+    display_status = 1;
+  } else {
+    gpio_config(&(gpio_config_t){
+        .intr_type = GPIO_INTR_NEGEDGE,
+        .mode = GPIO_MODE_INPUT,
+        .pin_bit_mask = 1ULL << GPIO_NUM_3,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+    });
+    gpio_install_isr_service(0);
+    // TODO: Add the display wakeup ISR
+    gpio_isr_handler_add(GPIO_NUM_3, wakeup_display, NULL);
+  }
 }
 
 void onsync(void) {
@@ -119,7 +187,6 @@ void onsync(void) {
 void host_task(void *param) { nimble_port_run(); }
 
 void app_main(void) {
-  wake_up();
   main_handle = xTaskGetCurrentTaskHandle();
   nvs_flash_init();
   nimble_port_init();
@@ -142,6 +209,23 @@ void app_main(void) {
   scd40_init(bus_handle, 400000, &scd40);
   sgp41 sgp41;
   sgp41_init(bus_handle, 400000, &sgp41);
+  ssd1306_handle_t ssd1306;
+  ssd1306_new_i2c(
+      &(ssd1306_config_t){
+          .bus = SSD1306_I2C,
+          .height = 64,
+          .width = 128,
+          .iface.i2c =
+              (ssd1306_i2c_cfg_t){
+                  .addr = 0x3C,
+                  .port = I2C_NUM_0,
+                  .rst_gpio = GPIO_NUM_NC,
+              },
+      },
+      &ssd1306);
+  xTaskCreate(displayData, "OLED Display", 8192 * 2, ssd1306, 2,
+              &display_handle);
+  config_display();
 
   scd40_stop_periodic_measurement(&scd40);
   vTaskDelay(pdMS_TO_TICKS(500));
@@ -168,14 +252,25 @@ void app_main(void) {
   sgp41_turn_heater_off(&sgp41);
 
   // TODO:  I2C swap and BMV080 Data
+  // NOTE: Left out BMV sensor reading functions since they'll just interfere
+  // with errors at runtime for this commit/release
 
   // Signal BLE that data is ready
   xTaskNotifyGive(ble_handle);
 
-  // TODO: Configure additional deepsleep and wake up pins and parameters
-
   // Wait for advertisement to complete
   xTaskNotifyWait(0, 0, NULL, portMAX_DELAY);
 
-  esp_deep_sleep(INTERVAL * 1000000ULL);
+  // TODO: Configure additional deepsleep and wake up pins and parameters
+  // 10s sleep time
+  esp_sleep_enable_timer_wakeup(1000000ULL * 10);
+  esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(1ULL << GPIO_NUM_3,
+                                                      ESP_GPIO_WAKEUP_GPIO_LOW);
+
+  if (display_status) {
+    // 5s delay to keep the display open
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    ssd1306_display_sleep(ssd1306);
+  }
+  esp_deep_sleep_start();
 }
